@@ -56,11 +56,20 @@ ORDER BY run_id ASC, id ASC;
 
 -- name: UpdateDeckJobStatusVersioned :execrows
 -- ambiguous_reason: set on AMBIGUOUS, NULLed on transitions out (resolve, retry).
+-- last_completed_step is stamped to total_steps on COMPLETED transitions so
+-- the per-step UI counter never strands at zero when a buffered STEP event
+-- arrives after the deck_job is already terminal (e.g. reconciler races the
+-- executor's outbox flush after orchestrator restart). Other transitions
+-- leave the cursor untouched so FAILED/AMBIGUOUS preserve partial progress.
 UPDATE deck_jobs
 SET status              = sqlc.arg(status),
     current_attempt_id  = sqlc.arg(current_attempt_id),
     error               = sqlc.arg(error),
     ambiguous_reason    = sqlc.arg(ambiguous_reason),
+    last_completed_step = CASE
+        WHEN sqlc.arg(status) = 'COMPLETED' THEN total_steps
+        ELSE last_completed_step
+    END,
     version             = version + 1
 WHERE run_id  = sqlc.arg(run_id)
   AND id      = sqlc.arg(id)
@@ -71,11 +80,17 @@ WHERE run_id  = sqlc.arg(run_id)
 -- in one of the allowed statuses, and the attempt_id matches.
 -- Returns rows affected so the handler can detect duplicate-vs-fresh.
 -- ambiguous_reason: set on AMBIGUOUS, NULLed on transitions out.
+-- last_completed_step: stamped to total_steps on COMPLETED so a late STEP
+-- event arriving against an already-terminal job can't strand the cursor.
 UPDATE deck_jobs
 SET status             = sqlc.arg(status),
     current_attempt_id = sqlc.arg(current_attempt_id),
     error              = sqlc.arg(error),
     ambiguous_reason   = sqlc.arg(ambiguous_reason),
+    last_completed_step = CASE
+        WHEN sqlc.arg(status) = 'COMPLETED' THEN total_steps
+        ELSE last_completed_step
+    END,
     version            = version + 1
 WHERE run_id  = sqlc.arg(run_id)
   AND id      = sqlc.arg(id)

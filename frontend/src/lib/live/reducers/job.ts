@@ -124,6 +124,13 @@ function applyJobTerminal(
         version: j.version + 1,
         error: errorMessage ?? j.error,
       };
+      // Mirror the backend's UpdateDeckJobStatus* CASE: on COMPLETED, stamp
+      // last_completed_step = total_steps so a tab watching live still
+      // shows the right count when a buffered STEP event lost the race
+      // against the terminal transition.
+      if (status === "COMPLETED" && j.total_steps != null) {
+        next.last_completed_step = j.total_steps;
+      }
       if (attemptId && j.recent_attempts) {
         next.recent_attempts = j.recent_attempts.map((a) =>
           a.attempt_id === attemptId
@@ -231,6 +238,11 @@ export function applyJobResolved(qc: QueryClient, e: Event): void {
         ambiguous_reason: null,
         version: j.version + 1,
       };
+      // Same UI-counter guarantee as applyJobTerminal: operator-declared
+      // COMPLETED stamps last_completed_step = total_steps.
+      if (targetStatus === "COMPLETED" && j.total_steps != null) {
+        next.last_completed_step = j.total_steps;
+      }
       if (attemptId && j.recent_attempts) {
         next.recent_attempts = j.recent_attempts.map((a) =>
           a.attempt_id === attemptId
