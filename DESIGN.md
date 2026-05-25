@@ -84,20 +84,16 @@ Pull, not push. The orchestrator stays stateless about each executor's reachable
 
 ### Long-poll with dispatcher-side notify
 
-Short-poll on its own would burn ~1 idle req/s/deck forever. `Poll` instead holds the connection open for up to `poll_hold_max` (25s in demo, 2s in e2e), returning `204` only if it timed out empty.
-
-Wakeups come from a per-deck notification broker at [backend/internal/dispatch/notify.go](backend/internal/dispatch/notify.go). The dispatcher loop ([backend/internal/dispatch/dispatch.go](backend/internal/dispatch/dispatch.go)) calls `notifyDeck(deck_id)` on every `READY → DISPATCHED` promotion. `Poll` subscribes to the per-deck channel *before* its first DB query — otherwise a dispatch landing between the query (missed it) and the subscribe (not listening yet) would only wake on the safety-net tick. That safety net is a 250ms re-query inside the long-poll loop, there for the case where a notify is genuinely dropped (broker entry GC'd between subscribe and notify); steady state doesn't depend on it.
-
-Steady-state idle cost per deck: one held connection, zero req/s. The naive short-poll alternative would have burned ~1 idle req/s/deck — at fleet=100 that's 100 req/s of pure "nothing for me?" traffic, which the wire captures made obvious.
+Each executor needs to find out promptly when the orchestrator dispatches work to its deck. Polling on a timer wastes traffic; pushing from the orchestrator would force it to track every executor's network address. So each executor instead holds a `GET /executor/poll` request open against the orchestrator for up to 25 seconds. The orchestrator answers immediately if it has a `DISPATCHED` job for that deck, returns 204 on timeout, and uses an in-process per-deck broker to wake the held request the instant a new job lands. 
 
 ### Liveness (heartbeat + reconciler probe)
 
-Executors `POST /executor/heartbeat` every 2 s (250 ms in e2e). The liveness monitor runs two scans:
+Each executor sends `POST /executor/heartbeat` every 2 seconds. The orchestrator's liveness monitor sweeps periodically and does two things:
 
-1. **Heartbeat age.** `decks.health` flips `HEALTHY → STALE` once heartbeat age exceeds `stale_threshold`, and `STALE → UNREACHABLE` if the stale window compounds with a failed probe. UNREACHABLE stops new dispatch until heartbeats return.
-2. **Attempt deadline.** Every `job_attempts` row carries a deadline (`attempt_deadline_base + attempt_deadline_per_step × steps`). When it fires and the deck's heartbeat isn't fresh, the attempt goes to the reconciler instead of flipping straight to AMBIGUOUS.
+1. **Tracks deck health.** If a deck's last heartbeat ages past `stale_threshold`, its health flips HEALTHY → STALE, and STALE → UNREACHABLE if it stays silent and a probe fails. UNREACHABLE blocks new dispatches to that deck until heartbeats return.
+2. **Watches in-flight attempt deadlines.** Every `job_attempts` row carries a deadline = `attempt_deadline_base + attempt_deadline_per_step × steps`. When that deadline fires and the deck's heartbeat isn't fresh, the orchestrator doesn't immediately give up — it asks the executor what happened.
 
-The reconciler dials `GET /executor/state?attempt_id=...`. The executor answers with an `ExecutorAttemptState` of `RECEIVED`, `IN_PROGRESS`, `COMPLETED`, or `FAILED`, or the probe itself fails (TCP error, timeout). The reconciler buckets the outcome — `applied`, `running`, `no_change`, `ambiguous`, `unreachable`, `no_dispatch` — and that bucket decides the next move: advance the projection if the executor handed us a terminal answer, hold if it's still genuinely running, escalate to AMBIGUOUS if we asked and we still don't know. That decision matrix is the load-bearing piece of recovery logic — it's the difference between "deck stayed silent and we waited" and "deck stayed silent and we made the operator decide."
+That ask is the reconciler. It dials `GET /executor/state?attempt_id=...` on the executor and decides what to do based on the answer: terminal outcome (COMPLETED / FAILED) → advance the projection; executor still running → wait; executor doesn't know, or the probe itself fails → flip the deck_job to AMBIGUOUS so the operator declares the physical outcome. This is the difference between "deck went silent and we silently waited" and "deck went silent, we asked, and we made the operator decide."
 
 ### At-least-once events, idempotent on `(attempt_id, kind)`
 
@@ -232,7 +228,7 @@ Comfortable at the prompt's 100-deck target. The wall above ~1000 is SQLite writ
 ### What we changed
 
 - **Long-poll `/executor/poll` with dispatcher notify** (wire capture showed 87% of polls returned 204) — idle traffic per deck drops to 1 held connection, 0 req/s; dispatch latency drops to near-zero.
-- **`decks_delta` on `/api/state` delta polls** (full `decks[]` was shipping every tick regardless of activity) — steady-state heartbeat slice scales with activity, not fleet size.
+- `**decks_delta` on `/api/state` delta polls** (full `decks[]` was shipping every tick regardless of activity) — steady-state heartbeat slice scales with activity, not fleet size.
 - **gzip response middleware** (no `Content-Encoding` was advertised) — bodies above 1 KiB compressed; small bodies pass through.
 - **Console visibility gating** (hidden tab kept polling at 1 Hz) — hidden tab issues 0 req/s, catch-up tick on `visibilitychange`.
 
