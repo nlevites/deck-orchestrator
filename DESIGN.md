@@ -164,7 +164,7 @@ sequenceDiagram
   Orch->>Orch: drain in-flight HTTP, exit
   Sup->>Orch: respawn (within respawn_delay)
   Orch->>DB: open WAL; read materialized rows as-is
-  Note over Orch: dispatcher re-evaluates READY jobs;<br/>notifyDeck for any pending work
+  Note over Orch: dispatcher re-evaluates READY jobs; notifyDeck for any pending work
   Note over Exec: kept running through the gap
   Exec->>Orch: POST /executor/events (catch-up from outbox)
   Orch->>DB: dedupe on (attempt_id, kind); apply new ones
