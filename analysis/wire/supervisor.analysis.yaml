@@ -1,0 +1,36 @@
+# Wire-capture supervisor config. Self-contained copy of
+# config/supervisor.demo.yaml. capture.sh sets STATE_DIR via env to
+# redirect into analysis/wire/runs/<timestamp>/. JSON log format is
+# inherited from LOG_FORMAT=json env vars (cleanenv overrides yaml).
+
+listen_addr: ":8090"
+state_dir: "./analysis/wire/runs/_unset"
+respawn_delay: "1s"
+
+log:
+  level: "info"
+  format: "json"
+
+orchestrator:
+  binary_path: "./backend/bin/orchestrator"
+  config_path: "./analysis/wire/orchestrator.analysis.yaml"
+  http_port: 8080
+  http_scheme_host: "http://localhost"
+  # DB_PATH is overridden via env by capture.sh per-run.
+  db_path: "./analysis/wire/runs/_unset/orchestrator.db"
+
+executor:
+  binary_path: "./backend/bin/executor"
+  orchestrator_url: "http://localhost:8080"
+  port_base: 9000
+  step_duration: "2s"
+  heartbeat_interval: "2s"
+  poll_interval: "1s"
+  advertise_scheme: "http"
+  advertise_host: "localhost"
+
+prelaunch_executors:
+  - "deck-1"
+  - "deck-2"
+  - "deck-3"
+  - "deck-4"

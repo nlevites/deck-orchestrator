@@ -1,0 +1,42 @@
+# Compressed-timing config for the failure-scenario demo. Use:
+#
+#   ./backend/bin/orchestrator -config config/demo.yaml
+#
+# Defaults are baked into the binary; this file overrides the timing
+# parameters from STATE_MACHINE.md §11 so each failure scenario fires
+# inside the recording window instead of minutes after.
+
+http:
+  addr: ":8080"
+  body_limit_bytes: 1048576
+  shutdown_grace: "5s"
+  read_header_timeout: "5s"
+  # Long-poll cap on /executor/poll. 25s keeps idle exec traffic to a
+  # heartbeat every 2s (no extra polls). See S1 in analysis/REPORT.md.
+  poll_hold_max: "25s"
+
+cors:
+  allowed_origins:
+    - "http://localhost:5173"
+
+store:
+  path: "./orchestrator.db"
+  busy_timeout: "5s"
+  max_read_conns: 8
+
+log:
+  level: "info"
+  format: "text"
+
+timeouts:
+  heartbeat_interval: "2s"
+  stale_threshold: "6s"
+  ambiguous_deadline: "15s"
+  # Per-attempt hang ceiling = base + total_steps * per_step. So a 1-step
+  # DAG fires AMBIGUOUS at 22s (the original failure-recording window),
+  # and a 30-step DAG gets 80s — long enough to actually finish on the
+  # demo's 2s/step executor, while still snappy for the chaos scenarios.
+  attempt_deadline_base: "20s"
+  attempt_deadline_per_step: "2s"
+  abort_retry_initial: "500ms"
+  abort_retry_max_duration: "30s"

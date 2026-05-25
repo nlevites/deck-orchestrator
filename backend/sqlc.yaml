@@ -1,0 +1,30 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema: "sql/orchestrator/0001_init.sql"
+    queries: "sql/orchestrator/queries"
+    gen:
+      go:
+        package: "storegen"
+        out: "internal/store/gen"
+        emit_interface: false
+        emit_json_tags: false
+        emit_prepared_queries: false
+        emit_exact_table_names: true
+        emit_empty_slices: true
+        emit_pointers_for_null_types: false
+        sql_package: "database/sql"
+  - engine: "sqlite"
+    schema: "sql/executor/0001_init.sql"
+    queries: "sql/executor/queries"
+    gen:
+      go:
+        package: "localstoregen"
+        out: "internal/executor/localstore/gen"
+        emit_interface: false
+        emit_json_tags: false
+        emit_prepared_queries: false
+        emit_exact_table_names: true
+        emit_empty_slices: true
+        emit_pointers_for_null_types: false
+        sql_package: "database/sql"

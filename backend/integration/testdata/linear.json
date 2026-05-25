@@ -1,0 +1,26 @@
+{
+  "id": "linear-pipeline",
+  "deck_jobs": [
+    {
+      "id": "prep",
+      "deck_id": "deck-1",
+      "depends_on": [],
+      "steps": [
+        { "type": "prepare", "description": "Prep sample tray" },
+        { "type": "transfer", "description": "Transfer reagent to plate" }
+      ]
+    },
+    {
+      "id": "incubate",
+      "deck_id": "deck-2",
+      "depends_on": ["prep"],
+      "steps": [{ "type": "incubate", "description": "Incubate at 37C for 30s" }]
+    },
+    {
+      "id": "measure",
+      "deck_id": "deck-3",
+      "depends_on": ["incubate"],
+      "steps": [{ "type": "measure", "description": "Read fluorescence" }]
+    }
+  ]
+}

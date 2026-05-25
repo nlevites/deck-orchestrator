@@ -1,0 +1,41 @@
+{
+  "id": "fanout-aliquot",
+  "deck_jobs": [
+    {
+      "id": "source-prep",
+      "deck_id": "deck-1",
+      "depends_on": [],
+      "steps": [
+        { "type": "prepare", "description": "Prep master mix" },
+        { "type": "aliquot", "description": "Aliquot to three destination plates" }
+      ]
+    },
+    {
+      "id": "assay-warm",
+      "deck_id": "deck-2",
+      "depends_on": ["source-prep"],
+      "steps": [
+        { "type": "incubate", "description": "Incubate at 37C" },
+        { "type": "measure", "description": "Read condition 1" }
+      ]
+    },
+    {
+      "id": "assay-ambient",
+      "deck_id": "deck-3",
+      "depends_on": ["source-prep"],
+      "steps": [
+        { "type": "incubate", "description": "Incubate at 25C" },
+        { "type": "measure", "description": "Read condition 2" }
+      ]
+    },
+    {
+      "id": "assay-cool",
+      "deck_id": "deck-4",
+      "depends_on": ["source-prep"],
+      "steps": [
+        { "type": "incubate", "description": "Incubate at 4C" },
+        { "type": "measure", "description": "Read condition 3" }
+      ]
+    }
+  ]
+}

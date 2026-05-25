@@ -1,0 +1,38 @@
+{
+  "id": "mixed-protocol",
+  "deck_jobs": [
+    {
+      "id": "prep",
+      "deck_id": "deck-1",
+      "depends_on": [],
+      "steps": [
+        { "type": "prepare", "description": "Prep master mix" },
+        { "type": "aliquot", "description": "Aliquot to two assay plates" }
+      ]
+    },
+    {
+      "id": "assay-warm",
+      "deck_id": "deck-2",
+      "depends_on": ["prep"],
+      "steps": [
+        { "type": "incubate", "description": "Warm incubation" },
+        { "type": "measure", "description": "Warm OD600 read" }
+      ]
+    },
+    {
+      "id": "assay-cool",
+      "deck_id": "deck-3",
+      "depends_on": ["prep"],
+      "steps": [
+        { "type": "incubate", "description": "Cool incubation" },
+        { "type": "measure", "description": "Cool OD600 read" }
+      ]
+    },
+    {
+      "id": "compare",
+      "deck_id": "deck-4",
+      "depends_on": ["assay-warm", "assay-cool"],
+      "steps": [{ "type": "analyze", "description": "Compare warm vs cool readings" }]
+    }
+  ]
+}

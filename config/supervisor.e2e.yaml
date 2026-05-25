@@ -1,0 +1,36 @@
+# E2E config for the dev-only process supervisor. Mirrors
+# config/supervisor.demo.yaml with:
+#   * Bind port :18090 so e2e and demo can coexist (demo is :8090).
+#   * Orchestrator on :18080 (matches config/e2e.yaml).
+#   * Executor port base 19000 so executors land on :19001..
+#   * Compressed timings (250ms heartbeat, 200ms step) for fast tests.
+#   * prelaunch_executors empty by default; the Playwright webServer
+#     env populates EXECUTOR_COUNT.
+
+listen_addr: ":18090"
+state_dir: "./.e2e-state"
+respawn_delay: "200ms"
+
+log:
+  level: "info"
+  format: "text"
+
+orchestrator:
+  binary_path: "./backend/bin/orchestrator"
+  config_path: "./config/e2e.yaml"
+  http_port: 18080
+  http_scheme_host: "http://localhost"
+  db_path: "./.e2e-state/orchestrator.db"
+
+executor:
+  binary_path: "./backend/bin/executor"
+  orchestrator_url: "http://localhost:18080"
+  port_base: 19000
+  step_duration: "200ms"
+  heartbeat_interval: "250ms"
+  poll_interval: "100ms"
+  advertise_scheme: "http"
+  advertise_host: "localhost"
+
+# Filled in by Playwright webServer env via EXECUTOR_COUNT.
+prelaunch_executors: []

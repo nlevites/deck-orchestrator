@@ -1,0 +1,25 @@
+{
+  "id": "parallel-assays",
+  "deck_jobs": [
+    {
+      "id": "track-a",
+      "deck_id": "deck-1",
+      "depends_on": [],
+      "steps": [
+        { "type": "transfer", "description": "Aliquot sample A" },
+        { "type": "incubate", "description": "Incubate 30s" },
+        { "type": "measure", "description": "Read A absorbance" }
+      ]
+    },
+    {
+      "id": "track-b",
+      "deck_id": "deck-2",
+      "depends_on": [],
+      "steps": [
+        { "type": "transfer", "description": "Aliquot sample B" },
+        { "type": "incubate", "description": "Incubate 30s" },
+        { "type": "measure", "description": "Read B absorbance" }
+      ]
+    }
+  ]
+}

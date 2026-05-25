@@ -1,0 +1,32 @@
+{
+  "id": "fanin-pool",
+  "deck_jobs": [
+    {
+      "id": "extract-a",
+      "deck_id": "deck-1",
+      "depends_on": [],
+      "steps": [{ "type": "extract", "description": "Extract from source A" }]
+    },
+    {
+      "id": "extract-b",
+      "deck_id": "deck-2",
+      "depends_on": [],
+      "steps": [{ "type": "extract", "description": "Extract from source B" }]
+    },
+    {
+      "id": "extract-c",
+      "deck_id": "deck-3",
+      "depends_on": [],
+      "steps": [{ "type": "extract", "description": "Extract from source C" }]
+    },
+    {
+      "id": "pool-and-measure",
+      "deck_id": "deck-4",
+      "depends_on": ["extract-a", "extract-b", "extract-c"],
+      "steps": [
+        { "type": "pool", "description": "Pool extracts into one plate" },
+        { "type": "measure", "description": "Read pooled signal" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+# Orchestrator config for wire-capture runs. Same as config/demo.yaml
+# but log.format=json so /backend/internal/api/mw_logging.go's per-request
+# entries land as NDJSON that analyze.py can ingest directly.
+
+http:
+  addr: ":8080"
+  body_limit_bytes: 1048576
+  shutdown_grace: "5s"
+  read_header_timeout: "5s"
+  poll_hold_max: "25s"
+
+cors:
+  allowed_origins:
+    - "http://localhost:5173"
+
+store:
+  path: "./orchestrator.db"
+  busy_timeout: "5s"
+  max_read_conns: 8
+
+log:
+  level: "info"
+  format: "json"
+
+timeouts:
+  heartbeat_interval: "2s"
+  stale_threshold: "6s"
+  ambiguous_deadline: "15s"
+  attempt_deadline: "20s"
+  abort_retry_initial: "500ms"
+  abort_retry_max_duration: "30s"

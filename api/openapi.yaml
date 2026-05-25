@@ -1,0 +1,2184 @@
+openapi: 3.1.0
+info:
+  title: Deck Fleet Orchestrator
+  version: 0.1.0
+  summary: HTTP API for the deck-fleet orchestrator and per-deck executor.
+  description: |
+    Machine-readable contract for the deck-fleet HTTP surface. The canonical
+    prose is in `docs/API.md`; this file is the source of truth for generated
+    Go and TypeScript types.
+
+    Two boundaries, two API styles:
+
+    - **Operator-facing API** (`/api/*`): RESTful resource shapes for reads,
+      RPC-style action endpoints for state transitions. Clients poll for
+      live updates (cadence in `docs/API.md`).
+      Consumed by the React UI and by `curl`-driven demos.
+    - **Executor-facing API** (`/executor/*`): the orchestrator hosts
+      `/executor/poll`, `/executor/events`, `/executor/heartbeat`. Each
+      executor process hosts `/executor/state` and `/executor/abort/{attempt_id}`
+      that the orchestrator dials on suspicion / cancel.
+
+    See `DESIGN.md` for the asymmetric pull/push topology and the state-machine
+    transitions every operator action must respect.
+  contact:
+    name: deck-fleet
+    url: https://example.invalid/deck-fleet
+
+servers:
+  - url: http://localhost:8080
+    description: Orchestrator (default for /api/* and /executor/poll, /events, /heartbeat)
+  - url: http://deck-1.lab.internal:8001
+    description: Executor (per-deck; for /executor/state and /executor/abort)
+
+tags:
+  - name: runs
+    description: Operator-facing run lifecycle.
+  - name: decks
+    description: Fleet view.
+  - name: live
+    description: |
+      Unified polling endpoints. Returns a full snapshot when
+      `since_seq=0` (bootstrap) and only events newer than `since_seq`
+      otherwise (steady state). The React console subscribes to this
+      surface for live updates; the same route shape powers both the
+      global fleet view and per-run detail screens.
+  - name: chaos
+    description: |
+      Runtime failure-injection. Operator-facing routes on the orchestrator
+      that proxy to the per-deck executor's chaos surface. Used by the UI's
+      deck context menu (hang / silent / drop events / pause network / crash)
+      to drive failure modes against a live deck.
+  - name: admin
+    description: Process-level operator actions (orchestrator restart).
+  - name: executor-inbound
+    description: Endpoints hosted by the orchestrator that executors call.
+  - name: executor-outbound
+    description: Endpoints hosted by each executor that the orchestrator dials.
+
+paths:
+  /api/runs:
+    post:
+      tags: [runs]
+      operationId: submitRun
+      summary: Submit a DAG.
+      description: |
+        Accept a new DAG, validate it, persist it, set initial state.
+        Idempotent on the submission `id`: re-submitting the same id returns
+        `409 DUPLICATE_RESOURCE` with the existing run in `details.current_state`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DagSubmission'
+      responses:
+        '201':
+          description: Run created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '400':
+          description: Malformed or schema-invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Duplicate id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body exceeds 1 MB.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: DAG semantic validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+        '503':
+          $ref: '#/components/responses/DegradedModeResponse'
+    get:
+      tags: [runs]
+      operationId: listRuns
+      summary: List runs.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/RunStatus'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Run list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RunSummary'
+        '400':
+          description: Bad query parameter.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /api/runs/{id}:
+    get:
+      tags: [runs]
+      operationId: getRun
+      summary: Get a run with its deck_jobs and recent events.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Run detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '404':
+          description: Run not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /api/runs/{id}/cancel:
+    post:
+      tags: [runs]
+      operationId: cancelRun
+      summary: Cancel a run (cascade).
+      description: |
+        Sets `runs.status = CANCELLED`; transitions every deck_job not already
+        terminal to `CANCELLED`. Best-effort abort signal is dialed for any
+        DISPATCHED/RUNNING job. See `DESIGN.md`.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRunRequest'
+      responses:
+        '200':
+          description: Cancelled. Returns the full updated run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '400':
+          description: Missing version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Run not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Version mismatch or already terminal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+        '503':
+          $ref: '#/components/responses/DegradedModeResponse'
+
+  /api/runs/{id}/jobs/{job_id}/retry:
+    post:
+      tags: [runs]
+      operationId: retryJob
+      summary: Retry a FAILED deck_job.
+      description: |
+        Transitions a FAILED `deck_job` back to `READY`. A new `attempt_id` is
+        allocated later by the Dispatcher on the subsequent `READY → DISPATCHED`
+        transition. See `DESIGN.md`.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/JobId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryJobRequest'
+      responses:
+        '200':
+          description: Retry queued. Returns the full updated run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '400':
+          description: Missing version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Run or job not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Version mismatch, invalid transition, or already terminal (parent run).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+        '503':
+          $ref: '#/components/responses/DegradedModeResponse'
+
+  /api/runs/{id}/jobs/{job_id}/resolve:
+    post:
+      tags: [runs]
+      operationId: resolveJob
+      summary: Resolve an AMBIGUOUS deck_job to COMPLETED or FAILED.
+      description: |
+        Transitions an `AMBIGUOUS` `deck_job` to `COMPLETED` or `FAILED`,
+        recording the operator's determination on the attempt (with
+        `outcome_source = OPERATOR_RESOLUTION`). See `DESIGN.md`.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/JobId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveJobRequest'
+      responses:
+        '200':
+          description: Resolved. Returns the full updated run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '400':
+          description: Missing version or invalid resolution.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Run or job not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Version mismatch or invalid transition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+        '503':
+          $ref: '#/components/responses/DegradedModeResponse'
+
+  /api/decks:
+    get:
+      tags: [decks]
+      operationId: listDecks
+      summary: Fleet view of decks with current health and current job.
+      responses:
+        '200':
+          description: Decks list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [decks]
+                properties:
+                  decks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Deck'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /api/decks/{deck_id}/release:
+    post:
+      tags: [decks]
+      operationId: releaseDeck
+      summary: Release a slot back to EMPTY.
+      description: |
+        Operator-deliberate vacate: clears `endpoint_url` and
+        `last_heartbeat_at`, sets `last_known_health = EMPTY`, emits
+        `DECK_HEALTH_CHANGED` if the prior state was non-EMPTY.
+        Idempotent on already-EMPTY slots. Refuses with
+        `409 SLOT_HAS_INFLIGHT_WORK` when any deck_job in
+        `DISPATCHED` / `RUNNING` / `AMBIGUOUS` references the slot --
+        the operator must resolve in-flight work first so released
+        attempts aren't silently abandoned.
+
+        Wired by the supervisor's detach path so a deliberate "remove
+        executor" round-trips to EMPTY instead of aging through
+        STALE -> UNREACHABLE. UNREACHABLE then unambiguously means
+        "executor crashed without operator action," restoring the
+        rubric's commitment to operator-visible state.
+      parameters:
+        - $ref: '#/components/parameters/DeckId'
+      responses:
+        '200':
+          description: Slot released (or already EMPTY).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deck'
+        '404':
+          description: Unknown deck_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slot has in-flight work; resolve before release.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: Slot is decommissioned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /executor/poll:
+    get:
+      tags: [executor-inbound]
+      operationId: executorPoll
+      summary: Short-poll for the next dispatch for a deck.
+      description: |
+        Returns `200` immediately if there is a `DISPATCHED` deck_job
+        for this deck whose attempt is not yet committed locally;
+        otherwise returns `204` immediately. The executor calls this on
+        a fixed `PollInterval` (default 500ms) and uses `INSERT OR
+        IGNORE` on `attempt_id` to dedupe redelivery across orchestrator
+        restarts. Short-poll over long-poll: simpler, no held subscriber
+        state across restarts, fine at the assignment's 100-deck scale.
+      parameters:
+        - name: deck_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Dispatch ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DispatchPayload'
+        '204':
+          description: Long-poll timed out with no work.
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /executor/events:
+    post:
+      tags: [executor-inbound]
+      operationId: executorEvent
+      summary: Deliver an executor state event.
+      description: |
+        Idempotent on `(attempt_id, kind)`. The handler returns `200` for all
+        of "applied", "duplicate", and "conflict_logged" — the response body's
+        `status` field distinguishes them so the executor's outbox stops
+        retrying on any 2xx. See `docs/API.md` §9.2.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecutorEventRequest'
+      responses:
+        '200':
+          description: |
+            Event received. The response body is discriminated on `status`:
+            `applied` (transition recorded), `duplicate` (already recorded,
+            matching outcome), or `conflict_logged` (already recorded,
+            different outcome — conflict event written, no state change).
+            All three are 2xx so the executor outbox stops retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutorEventResponse'
+              examples:
+                applied:
+                  summary: Fresh apply; the orchestrator recorded the transition.
+                  value:
+                    status: applied
+                    new_job_status: COMPLETED
+                    new_job_version: 9
+                duplicate:
+                  summary: Already recorded with the same outcome; outbox stops retrying.
+                  value:
+                    status: duplicate
+                    current_outcome: COMPLETED
+                    current_outcome_source: EXECUTOR_EVENT
+                conflict_logged_different_outcome:
+                  summary: Already recorded with a different outcome; conflict event written.
+                  value:
+                    status: conflict_logged
+                    current_outcome: FAILED
+                    current_outcome_source: OPERATOR_RESOLUTION
+                    your_reported_outcome: COMPLETED
+                conflict_logged_cancelled_job:
+                  summary: deck_job was cancelled; executor's event is logged as a conflict.
+                  value:
+                    status: conflict_logged
+                    current_outcome: null
+                    current_outcome_source: null
+                    current_job_status: CANCELLED
+                    your_reported_outcome: COMPLETED
+        '404':
+          description: Unknown attempt_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /executor/heartbeat:
+    post:
+      tags: [executor-inbound]
+      operationId: executorHeartbeat
+      summary: Heartbeat with current claim and reachable endpoint URL.
+      description: |
+        Fire-and-forget per `DESIGN.md`. Updates the deck
+        row's endpoint_url + last_heartbeat_at; on the first heartbeat
+        after the slot was EMPTY emits `DECK_REGISTERED`; on a health
+        transition emits `DECK_HEALTH_CHANGED`. The orchestrator classifies
+        health, the executor does not self-report.
+
+        Slot identity is fleet-bound: the orchestrator seeds N deck slots
+        from `fleet_size` at boot, and heartbeats for ids outside that
+        set are rejected with 404. Decommissioned slots reject heartbeats
+        with 410. The executor binary treats both as fatal config errors
+        and exits with code 78 to avoid a respawn loop.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Heartbeat'
+      responses:
+        '204':
+          description: Heartbeat received.
+        '404':
+          description: Heartbeating deck_id is not in this orchestrator's fleet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: Heartbeating deck_id was decommissioned by an operator.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /executor/state:
+    get:
+      tags: [executor-outbound]
+      operationId: executorGetState
+      summary: (Executor-hosted) Authoritative state for an attempt, or overall.
+      description: |
+        Dialed by the orchestrator's Reconciler on suspicion of drift. When
+        `attempt_id` is omitted, returns the executor's overall claim and
+        recent attempts. See `docs/API.md` §9.4.
+      servers:
+        - url: http://deck-1.lab.internal:8001
+          description: Per-deck executor URL (`decks.endpoint_url`).
+      parameters:
+        - name: attempt_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Executor's view (per-attempt or overall).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutorStateResponse'
+        '404':
+          description: Unknown attempt_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /executor/abort/{attempt_id}:
+    post:
+      tags: [executor-outbound]
+      operationId: executorAbort
+      summary: (Executor-hosted) Best-effort abort signal for an in-flight attempt.
+      description: |
+        Dialed by the orchestrator on operator cancel. The executor sets
+        `attempts.abort_requested` and returns immediately. See `docs/API.md` §9.5.
+      servers:
+        - url: http://deck-1.lab.internal:8001
+          description: Per-deck executor URL (`decks.endpoint_url`).
+      parameters:
+        - name: attempt_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Abort flag set or already terminal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AbortResponse'
+        '404':
+          description: Executor has no record of this attempt_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /api/decks/{deck_id}/chaos:
+    get:
+      tags: [chaos]
+      operationId: getDeckChaos
+      summary: Current chaos state for a deck.
+      description: |
+        Orchestrator proxies the request to the deck's executor (looked up
+        via `decks.endpoint_url`). Returns whatever runtime failure-injection
+        flags are currently set on the executor.
+      parameters:
+        - $ref: '#/components/parameters/DeckId'
+      responses:
+        '200':
+          description: Current state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChaosState'
+        '502':
+          description: Executor unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Unknown deck_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      tags: [chaos]
+      operationId: patchDeckChaos
+      summary: Merge a chaos patch into a deck's runtime state.
+      description: |
+        Body is a patch — missing fields leave the corresponding flag
+        untouched, present fields overwrite. To explicitly disable a
+        step-aware arm, send the field with value `0`.
+      parameters:
+        - $ref: '#/components/parameters/DeckId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChaosPatch'
+      responses:
+        '200':
+          description: Merged state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChaosState'
+        '400':
+          description: Malformed body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: Executor unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Unknown deck_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/decks/{deck_id}/chaos/reset:
+    post:
+      tags: [chaos]
+      operationId: resetDeckChaos
+      summary: Clear every chaos flag on a deck.
+      parameters:
+        - $ref: '#/components/parameters/DeckId'
+      responses:
+        '200':
+          description: Reset state (all-zero).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChaosState'
+        '502':
+          description: Executor unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Unknown deck_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/decks/{deck_id}/chaos/crash:
+    post:
+      tags: [chaos]
+      operationId: crashDeck
+      summary: One-shot executor crash (os.Exit on the deck process).
+      description: |
+        The executor writes a 200 response then exits. Recovery depends on
+        whatever supervisor is running the executor (the demo script
+        respawns it; production would use systemd or similar).
+      parameters:
+        - $ref: '#/components/parameters/DeckId'
+      responses:
+        '200':
+          description: Crash initiated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [crashing]
+        '502':
+          description: Executor unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Unknown deck_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/admin/restart:
+    post:
+      tags: [admin]
+      operationId: restartOrchestrator
+      summary: Gracefully exit the orchestrator process.
+      description: |
+        The orchestrator writes a 202 response, flushes, then calls
+        `os.Exit(0)` after a brief delay. A supervisor (systemd, the
+        demo script, etc.) is responsible for relaunching it. Used by
+        the UI's "Restart orchestrator" button to demonstrate
+        ARCHITECTURE.md §5.4 scenario 1 (orchestrator restart + startup
+        reconcile).
+      responses:
+        '202':
+          description: Restart accepted; process exit imminent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [restarting]
+
+  /api/state:
+    get:
+      tags: [live]
+      operationId: getState
+      summary: Bootstrap or delta-poll the global console state.
+      description: |
+        Returns a full snapshot (`runs`, `decks`, recent `events`,
+        `server_seq`) when `since_seq` is 0 or absent. Returns only
+        events with `seq > since_seq` otherwise. The client uses
+        `server_seq` from each response as the next request's
+        `since_seq`. Gap detection (event seq != last+1) and unknown
+        event kinds prompt a re-bootstrap by resetting `since_seq` to 0.
+
+        Drives the live React console: a single 1-second poll replaces
+        the per-resource refetch hooks the early prototype used.
+      parameters:
+        - name: since_seq
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Maximum number of events to return in this response.
+            Caps to 1000. Clients that see `events.length == limit`
+            should poll again immediately (or re-bootstrap if the
+            event log has rotated).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 500
+      responses:
+        '200':
+          description: State snapshot or delta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StateSnapshot'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+  /api/runs/{id}/state:
+    get:
+      tags: [live]
+      operationId: getRunState
+      summary: Bootstrap or delta-poll a run-detail screen.
+      description: |
+        Same pattern as `GET /api/state` but scoped to one run: the
+        snapshot carries the full `Run` (with recent attempts) and
+        only the events that touch that run. Used by the run-detail
+        screen so the global fleet payload is not re-sent on every
+        tick.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: since_seq
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 500
+      responses:
+        '200':
+          description: Run state snapshot or delta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunStateSnapshot'
+        '404':
+          description: Run not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalErrorResponse'
+
+components:
+
+  parameters:
+    RunId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+    DeckId:
+      name: deck_id
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    InternalErrorResponse:
+      description: Unhandled server error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    DegradedModeResponse:
+      description: Orchestrator in degraded mode; mutations refused.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+
+    # --------------------------------------------------------------------
+    # Enums (string-typed, closed sets)
+    # --------------------------------------------------------------------
+
+    RunStatus:
+      type: string
+      description: |
+        Materialized run status. Terminal statuses are `COMPLETED` (all
+        deck_jobs succeeded) and `CANCELLED` (operator cut the run).
+
+        `FAILED` and `AMBIGUOUS` are non-terminal: the run is awaiting an
+        operator decision (retry / resolve, or cancel). `terminal_at` is
+        only stamped on terminal statuses; for FAILED / AMBIGUOUS it is
+        null until the operator either resumes the run (retry / resolve)
+        or terminalizes it via cancel. See DESIGN.md.
+      enum:
+        - PENDING
+        - RUNNING
+        - COMPLETED
+        - FAILED
+        - AMBIGUOUS
+        - CANCELLED
+
+    DeckJobStatus:
+      type: string
+      description: deck_job state. See `DESIGN.md`.
+      enum:
+        - PENDING
+        - READY
+        - DISPATCHED
+        - RUNNING
+        - COMPLETED
+        - FAILED
+        - AMBIGUOUS
+        - CANCELLED
+
+    DeckHealth:
+      type: string
+      description: |
+        Materialized deck health classification (orchestrator-side).
+        `EMPTY` is the steady state of a fleet slot that has never been
+        attached, or whose executor has detached and the orchestrator's
+        liveness sweep has cleared its endpoint/heartbeat scalars.
+      enum:
+        - EMPTY
+        - HEALTHY
+        - STALE
+        - UNREACHABLE
+
+    OutcomeSource:
+      type: string
+      description: Authority that determined an attempt's terminal outcome.
+      enum:
+        - EXECUTOR_EVENT
+        - RECONCILE
+        - OPERATOR_RESOLUTION
+
+    AttemptOutcome:
+      type: string
+      description: |
+        Terminal outcome stamped on `job_attempts`. Deliberately excludes
+        AMBIGUOUS and CANCELLED — those are deck_job states, not attempt
+        outcomes (see `DESIGN.md`).
+      enum:
+        - COMPLETED
+        - FAILED
+
+    ErrorCode:
+      type: string
+      description: Closed enum of error codes. Used as the discriminator on `Error`.
+      enum:
+        - INVALID_JSON
+        - SCHEMA_VIOLATION
+        - MISSING_VERSION
+        - INVALID_RESOLUTION
+        - RUN_NOT_FOUND
+        - JOB_NOT_FOUND
+        - UNKNOWN_ATTEMPT
+        - DECK_NOT_FOUND
+        - DECK_DECOMMISSIONED
+        - EXECUTOR_UNREACHABLE
+        - VERSION_MISMATCH
+        - DUPLICATE_RESOURCE
+        - ALREADY_TERMINAL
+        - INVALID_TRANSITION
+        - DAG_VALIDATION_FAILED
+        - PAYLOAD_TOO_LARGE
+        - INTERNAL_ERROR
+        - DEGRADED_MODE
+        - SLOT_HAS_INFLIGHT_WORK
+
+    DagValidationCode:
+      type: string
+      description: |
+        Inner code in a `DAG_VALIDATION_FAILED.details.errors[]` entry.
+        `DECK_DECOMMISSIONED` is reserved for decks that exist in the
+        fleet but have been retired; `UNKNOWN_DECK` is for ids outside
+        the configured fleet entirely.
+      enum:
+        - DAG_HAS_NO_JOBS
+        - DUPLICATE_JOB_ID
+        - JOB_HAS_NO_STEPS
+        - UNKNOWN_DECK
+        - DECK_DECOMMISSIONED
+        - UNKNOWN_DEPENDENCY
+        - DAG_HAS_CYCLE
+
+    ExecutorEventKind:
+      type: string
+      description: |
+        Kinds the executor delivers via POST /executor/events.
+        STEP_COMPLETED is a scalar progress update (no state-machine transition);
+        the orchestrator applies a monotonic UPDATE to deck_jobs.last_completed_step
+        and appends a JOB_STEP_COMPLETED event for the operator surface.
+        Payload for STEP_COMPLETED: `{"step": <1-indexed int>, "total": <int>}`.
+      enum:
+        - RUNNING
+        - COMPLETED
+        - FAILED
+        - STEP_COMPLETED
+
+    EventKind:
+      type: string
+      description: |
+        Closed enum of orchestrator-side event kinds written to the
+        `events` table. The set mirrors `backend/internal/eventlog/kinds.go`
+        and `STATE_MACHINE.md` §10 (the event taxonomy). Frontend reducers
+        in `lib/live/reducers/` are indexed on these values.
+      enum:
+        - RUN_SUBMITTED
+        - RUN_STATUS_CHANGED
+        - JOB_READY
+        - JOB_DISPATCHED
+        - JOB_RUNNING
+        - JOB_STEP_COMPLETED
+        - JOB_COMPLETED
+        - JOB_FAILED
+        - JOB_AMBIGUOUS
+        - JOB_CANCELLED
+        - JOB_RESOLVED
+        - JOB_RETRIED
+        - DECK_REGISTERED
+        - DECK_HEALTH_CHANGED
+        - EXECUTOR_CONFLICT_LOGGED
+
+    ExecutorAttemptState:
+      type: string
+      description: Executor-side attempt state. See `DESIGN.md`.
+      enum:
+        - RECEIVED
+        - IN_PROGRESS
+        - COMPLETED
+        - FAILED
+
+    # --------------------------------------------------------------------
+    # Sub-objects
+    # --------------------------------------------------------------------
+
+    Step:
+      type: object
+      required: [type, description]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+        description:
+          type: string
+
+    JobAttempt:
+      type: object
+      description: |
+        One row of `job_attempts`. See `DESIGN.md`.
+
+        Nullability: `outcome`/`outcome_at`/`outcome_source` are null while
+        the attempt is still in flight; they are set together (per the
+        all-or-nothing CHECK on the storage row) when the attempt reaches a
+        terminal answer. `result` is populated only on COMPLETED via an
+        executor event; `error` only on FAILED.
+      required:
+        - attempt_id
+        - dispatched_at
+      additionalProperties: false
+      properties:
+        attempt_id:
+          type: string
+          format: uuid
+        dispatched_at:
+          type: string
+          format: date-time
+        outcome:
+          allOf:
+            - $ref: '#/components/schemas/AttemptOutcome'
+          nullable: true
+        outcome_at:
+          type: string
+          format: date-time
+          nullable: true
+        outcome_source:
+          allOf:
+            - $ref: '#/components/schemas/OutcomeSource'
+          nullable: true
+        result:
+          type: object
+          additionalProperties: true
+          description: Executor-reported result payload (opaque).
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        operator_note:
+          type: string
+          nullable: true
+
+    DeckJob:
+      type: object
+      description: A deck_job row plus recent attempts. See `DESIGN.md`.
+      required:
+        - id
+        - deck_id
+        - depends_on
+        - steps
+        - status
+        - version
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        deck_id:
+          type: string
+        depends_on:
+          type: array
+          items:
+            type: string
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/Step'
+        status:
+          $ref: '#/components/schemas/DeckJobStatus'
+        current_attempt_id:
+          type: string
+          format: uuid
+          nullable: true
+        version:
+          type: integer
+          format: int64
+        error:
+          type: string
+          nullable: true
+        last_completed_step:
+          type: integer
+          format: int64
+          description: |
+            Bootstrap denormalization of the most recent committed step cursor.
+            0 means no steps have completed (job not yet running or just dispatched).
+            Updated by the orchestrator each time it receives a STEP_COMPLETED
+            executor event; also set to `total_steps` when a COMPLETED event lands
+            so the UI never shows a partial count on a finished job.
+        total_steps:
+          type: integer
+          format: int64
+          description: |
+            Total number of steps in this deck_job. Set at submit time from
+            `len(deck_job.steps)`. Combined with `last_completed_step` this
+            allows the UI to render "step 2/5" without replaying the event log.
+        ambiguous_reason:
+          type: string
+          enum:
+            - DEADLINE_ELAPSED
+            - EXECUTOR_REPORTED_UNKNOWN
+            - DEADLINE_EXCEEDED
+          nullable: true
+          description: |
+            Set when status is AMBIGUOUS, identifying which liveness path
+            declared the attempt unreachable: DEADLINE_EXCEEDED (the
+            orchestrator's per-attempt hang ceiling fired and the executor
+            still reported IN_PROGRESS), DEADLINE_ELAPSED (the deck went
+            UNREACHABLE and the AmbiguousDeadline expired with no
+            authoritative outcome), or EXECUTOR_REPORTED_UNKNOWN (the
+            executor explicitly said it lost track of the attempt).
+            Cleared (null) when the operator resolves or retries.
+        recent_attempts:
+          type: array
+          description: Newest first. Only present on `GET /api/runs/{id}` responses.
+          items:
+            $ref: '#/components/schemas/JobAttempt'
+
+    DeckJobsSummary:
+      type: object
+      description: Aggregate counts of deck_jobs by status in a run.
+      required: [total, by_status]
+      additionalProperties: false
+      properties:
+        total:
+          type: integer
+        by_status:
+          type: object
+          description: Map of `DeckJobStatus` to count. Statuses with zero count may be omitted.
+          additionalProperties:
+            type: integer
+
+    CurrentJob:
+      type: object
+      description: The deck_job currently occupying a deck's slot. Null when the deck is idle.
+      required: [run_id, job_id, status]
+      additionalProperties: false
+      properties:
+        run_id:
+          type: string
+        job_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/DeckJobStatus'
+
+    Deck:
+      type: object
+      description: |
+        Fleet view row. See `DESIGN.md`. With the
+        decks-as-slots model, `endpoint_url` and `last_heartbeat_at` are
+        nullable: a slot that has never been attached (or whose executor
+        has been detached long enough for the liveness sweep to clear
+        its scalars) has neither, and reports `last_known_health = EMPTY`.
+        `decommissioned_at` is non-null only for retired slots; the
+        operator-facing fleet view filters them out by default.
+      required:
+        - id
+        - first_seen_at
+        - last_known_health
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        first_seen_at:
+          type: string
+          format: date-time
+        last_heartbeat_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_known_health:
+          $ref: '#/components/schemas/DeckHealth'
+        last_claimed_attempt_id:
+          type: string
+          format: uuid
+          nullable: true
+        endpoint_url:
+          type: string
+          nullable: true
+          description: |
+            The advertise URL the orchestrator dials for /executor/state
+            and /executor/abort. Populated on first heartbeat; nullable
+            until then (empty slot) and cleared by long-detach aging.
+        decommissioned_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Operator-set retirement timestamp. Decommissioned slots are
+            hidden from the default fleet listing and reject heartbeats
+            with 410 Gone.
+        current_job:
+          allOf:
+            - $ref: '#/components/schemas/CurrentJob'
+          nullable: true
+
+    # --------------------------------------------------------------------
+    # DAG submission
+    # --------------------------------------------------------------------
+
+    DagJobSubmission:
+      type: object
+      description: A deck_job as submitted by the operator (no server-added fields).
+      required: [id, deck_id, depends_on, steps]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        deck_id:
+          type: string
+        depends_on:
+          type: array
+          items:
+            type: string
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/Step'
+
+    DagSubmission:
+      type: object
+      description: The DAG payload an operator submits to `POST /api/runs`.
+      required: [id, deck_jobs]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        deck_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/DagJobSubmission'
+
+    # --------------------------------------------------------------------
+    # Aggregates
+    # --------------------------------------------------------------------
+
+    RunSummary:
+      type: object
+      description: List-view shape (omits `dag` and per-job `steps`).
+      required:
+        - id
+        - status
+        - version
+        - submitted_at
+        - deck_jobs_summary
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        version:
+          type: integer
+          format: int64
+        submitted_at:
+          type: string
+          format: date-time
+        terminal_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Stamped only when the run reaches a terminal status (`COMPLETED`
+            or `CANCELLED`). Null while in `PENDING`, `RUNNING`, `FAILED`,
+            or `AMBIGUOUS` — including FAILED runs that are awaiting an
+            operator decision.
+        deck_jobs_summary:
+          $ref: '#/components/schemas/DeckJobsSummary'
+
+    Run:
+      type: object
+      description: Run detail. Same shape returned by `POST /api/runs` and operator mutations.
+      required:
+        - id
+        - status
+        - version
+        - submitted_at
+        - dag
+        - deck_jobs
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        version:
+          type: integer
+          format: int64
+        submitted_at:
+          type: string
+          format: date-time
+        terminal_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Stamped only when the run reaches a terminal status (`COMPLETED`
+            or `CANCELLED`). Null while in `PENDING`, `RUNNING`, `FAILED`,
+            or `AMBIGUOUS` — including FAILED runs that are awaiting an
+            operator decision.
+        dag:
+          $ref: '#/components/schemas/DagSubmission'
+        deck_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeckJob'
+
+    Event:
+      type: object
+      description: |
+        One row of the orchestrator's `events` audit table, serialized
+        for the live polling surface. `payload` is kind-dependent; see
+        `backend/internal/eventlog/payloads.go` for shapes (callers
+        should generally key off `kind` + scope fields and treat
+        payload as advisory).
+      required:
+        - seq
+        - occurred_at
+        - kind
+        - payload
+      additionalProperties: false
+      properties:
+        seq:
+          type: integer
+          format: int64
+          description: Monotonically increasing event sequence (DB primary key).
+        occurred_at:
+          type: string
+          format: date-time
+          description: Orchestrator-stamped wall clock.
+        kind:
+          $ref: '#/components/schemas/EventKind'
+        run_id:
+          type: string
+          nullable: true
+        job_id:
+          type: string
+          nullable: true
+        deck_id:
+          type: string
+          nullable: true
+        attempt_id:
+          type: string
+          format: uuid
+          nullable: true
+        payload:
+          type: object
+          description: Kind-specific extras. Empty object when there are none.
+          additionalProperties: true
+
+    StateSnapshot:
+      type: object
+      description: |
+        Response for `GET /api/state`. When `since_seq=0` (bootstrap)
+        `runs` and `decks` are populated with the current fleet view;
+        in steady state (`since_seq > 0`) `decks` is omitted and
+        `decks_delta` carries only the touched-since slice. `server_seq`
+        is the highest event seq known to the orchestrator at response
+        time — clients use it as the next request's `since_seq`.
+      required:
+        - server_seq
+        - events
+      additionalProperties: false
+      properties:
+        server_seq:
+          type: integer
+          format: int64
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        runs:
+          type: array
+          description: Bootstrap-only. Omitted from delta responses.
+          items:
+            $ref: '#/components/schemas/RunSummary'
+        decks:
+          type: array
+          description: |
+            Bootstrap-only authoritative slice for every deck. Omitted
+            from delta responses (since_seq > 0); use `decks_delta` there.
+          items:
+            $ref: '#/components/schemas/Deck'
+        decks_delta:
+          type: array
+          description: |
+            Delta-only. Decks whose row was touched since `since_seq`:
+            union of (a) decks referenced by any event with seq >
+            since_seq and (b) decks whose `last_heartbeat_at` advanced
+            inside the recent freshness window (orchestrator-chosen,
+            currently 5s). Clients merge by `id` into the existing
+            decks cache instead of replacing wholesale. Bounds steady
+            poll cost by activity rather than fleet size (see S3 in
+            analysis/inefficiencies/inefficiencies.md).
+          items:
+            $ref: '#/components/schemas/Deck'
+
+    RunStateSnapshot:
+      type: object
+      description: |
+        Response for `GET /api/runs/{id}/state`. Same semantics as
+        `StateSnapshot` but scoped to one run; `events` only includes
+        rows whose `run_id` matches. `run` is populated on bootstrap.
+      required:
+        - server_seq
+        - events
+      additionalProperties: false
+      properties:
+        server_seq:
+          type: integer
+          format: int64
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        run:
+          allOf:
+            - $ref: '#/components/schemas/Run'
+          nullable: true
+          description: Bootstrap-only. Omitted from delta responses.
+
+    # --------------------------------------------------------------------
+    # Operator action requests
+    # --------------------------------------------------------------------
+
+    CancelRunRequest:
+      type: object
+      required: [expected_version]
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          format: int64
+
+    RetryJobRequest:
+      type: object
+      required: [expected_version]
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          format: int64
+
+    ResolveJobRequest:
+      type: object
+      required: [expected_version, resolution]
+      additionalProperties: false
+      properties:
+        expected_version:
+          type: integer
+          format: int64
+        resolution:
+          $ref: '#/components/schemas/AttemptOutcome'
+        operator_note:
+          type: string
+          description: Optional free-text note. Recommended for FAILED resolutions.
+
+    # --------------------------------------------------------------------
+    # Executor protocol shapes
+    # --------------------------------------------------------------------
+
+    DispatchPayload:
+      type: object
+      description: Response from a successful `GET /executor/poll`.
+      required: [attempt_id, run_id, job_id, steps]
+      additionalProperties: false
+      properties:
+        attempt_id:
+          type: string
+          format: uuid
+        run_id:
+          type: string
+        job_id:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/Step'
+
+    ExecutorEventRequest:
+      type: object
+      required: [attempt_id, kind, occurred_at]
+      additionalProperties: false
+      properties:
+        attempt_id:
+          type: string
+          format: uuid
+        kind:
+          $ref: '#/components/schemas/ExecutorEventKind'
+        occurred_at:
+          type: string
+          format: date-time
+          description: Executor wall-clock. Advisory; orchestrator stamps its own server-side time.
+        payload:
+          type: object
+          description: |
+            Optional kind-specific payload.
+            For COMPLETED: `{"result": {...}}`.
+            For FAILED: `{"error": "..."}`.
+            For RUNNING: typically absent or empty.
+            For STEP_COMPLETED: `{"step": <1-indexed int>, "total": <int>}`.
+              The orchestrator applies a monotonic MAX update to
+              deck_jobs.last_completed_step and appends JOB_STEP_COMPLETED
+              to the event log. No state-machine transition; job stays RUNNING.
+          additionalProperties: true
+
+    ExecutorEventStatus:
+      type: string
+      description: Discriminator on `ExecutorEventResponse`.
+      enum:
+        - applied
+        - duplicate
+        - conflict_logged
+
+    ExecutorEventApplied:
+      type: object
+      description: |
+        The state transition was applied. Returned when the incoming
+        `(attempt_id, kind)` had no recorded outcome yet.
+      required: [status, new_job_status, new_job_version]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [applied]
+        new_job_status:
+          $ref: '#/components/schemas/DeckJobStatus'
+        new_job_version:
+          type: integer
+          format: int64
+
+    ExecutorEventDuplicate:
+      type: object
+      description: |
+        The orchestrator already had the same `(attempt_id, kind)` outcome
+        recorded; the incoming event matches. The executor's outbox treats
+        this as success and stops retrying.
+      required: [status, current_outcome, current_outcome_source]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [duplicate]
+        current_outcome:
+          allOf:
+            - $ref: '#/components/schemas/AttemptOutcome'
+          nullable: true
+        current_outcome_source:
+          allOf:
+            - $ref: '#/components/schemas/OutcomeSource'
+          nullable: true
+
+    ExecutorEventConflictLogged:
+      type: object
+      description: |
+        The orchestrator had a different outcome already recorded (or the
+        deck_job has been CANCELLED). The conflict is logged as an
+        `EXECUTOR_CONFLICT_LOGGED` event; no state transition occurs. The
+        executor's outbox stops retrying.
+      required: [status, current_outcome, current_outcome_source, your_reported_outcome]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [conflict_logged]
+        current_outcome:
+          allOf:
+            - $ref: '#/components/schemas/AttemptOutcome'
+          nullable: true
+          description: Null when the conflict is against a CANCELLED deck_job that never had an attempt outcome.
+        current_outcome_source:
+          allOf:
+            - $ref: '#/components/schemas/OutcomeSource'
+          nullable: true
+        your_reported_outcome:
+          $ref: '#/components/schemas/ExecutorEventKind'
+        current_job_status:
+          allOf:
+            - $ref: '#/components/schemas/DeckJobStatus'
+          description: Populated when the conflict source is a cancelled deck_job (e.g., `CANCELLED`). Optional otherwise.
+
+    ExecutorEventResponse:
+      description: Discriminated union over the three response shapes of POST /executor/events.
+      oneOf:
+        - $ref: '#/components/schemas/ExecutorEventApplied'
+        - $ref: '#/components/schemas/ExecutorEventDuplicate'
+        - $ref: '#/components/schemas/ExecutorEventConflictLogged'
+      discriminator:
+        propertyName: status
+        mapping:
+          applied: '#/components/schemas/ExecutorEventApplied'
+          duplicate: '#/components/schemas/ExecutorEventDuplicate'
+          conflict_logged: '#/components/schemas/ExecutorEventConflictLogged'
+
+    Heartbeat:
+      type: object
+      required: [deck_id, endpoint_url]
+      additionalProperties: false
+      properties:
+        deck_id:
+          type: string
+        current_attempt_id:
+          type: string
+          format: uuid
+          nullable: true
+        endpoint_url:
+          type: string
+          format: uri
+          description: URL the orchestrator dials for `/executor/state` and `/executor/abort/{attempt_id}`.
+
+    ExecutorStateAttempt:
+      type: object
+      required: [attempt_id, state, received_at]
+      additionalProperties: false
+      properties:
+        attempt_id:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/ExecutorAttemptState'
+        received_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        terminal_at:
+          type: string
+          format: date-time
+          nullable: true
+        result:
+          type: object
+          additionalProperties: true
+          nullable: true
+        error:
+          type: string
+          nullable: true
+
+    ExecutorStateOverall:
+      type: object
+      required: [deck_id, recent_attempts]
+      additionalProperties: false
+      properties:
+        deck_id:
+          type: string
+        current_attempt_id:
+          type: string
+          format: uuid
+          nullable: true
+        current_state:
+          allOf:
+            - $ref: '#/components/schemas/ExecutorAttemptState'
+          nullable: true
+        recent_attempts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExecutorStateAttempt'
+
+    ExecutorStateResponse:
+      description: |
+        Either a per-attempt state (when called with `attempt_id`) or an
+        overall executor state (when called without).
+      oneOf:
+        - $ref: '#/components/schemas/ExecutorStateAttempt'
+        - $ref: '#/components/schemas/ExecutorStateOverall'
+
+    AbortStatus:
+      type: string
+      enum:
+        - abort_requested
+        - already_terminal
+
+    AbortResponse:
+      type: object
+      required: [status, attempt_id]
+      additionalProperties: false
+      properties:
+        status:
+          $ref: '#/components/schemas/AbortStatus'
+        attempt_id:
+          type: string
+          format: uuid
+        final_state:
+          $ref: '#/components/schemas/ExecutorAttemptState'
+
+    ChaosState:
+      type: object
+      description: |
+        Complete view of an executor's runtime chaos flags. Returned by
+        `GET /api/decks/{deck_id}/chaos` and as the success response of
+        every chaos mutation.
+      required:
+        - hang
+        - hang_after_step
+        - crash_after_step
+        - silent
+        - drop_events
+        - pause_egress
+        - pause_ingress
+      additionalProperties: false
+      properties:
+        hang:
+          type: boolean
+          description: Worker blocks at next step boundary while true.
+        hang_after_step:
+          type: integer
+          minimum: 0
+          description: |
+            Armed: the worker promotes the immediate-hang toggle to true
+            after completing step N. Zero disables.
+        crash_after_step:
+          type: integer
+          minimum: 0
+          description: |
+            Armed: the worker invokes the crash callback after completing
+            step N. Zero disables.
+        silent:
+          type: boolean
+          description: Worker suppresses heartbeats while true.
+        drop_events:
+          type: boolean
+          description: Outbox flusher pretends every delivery failed while true.
+        pause_egress:
+          type: boolean
+          description: Executor -> orchestrator HTTP returns immediate errors while true.
+        pause_ingress:
+          type: boolean
+          description: Orchestrator -> executor HTTP connections are dropped while true (except /executor/chaos and /health, which always answer).
+
+    ChaosPatch:
+      type: object
+      description: |
+        Partial update to a deck's chaos state. Missing fields leave the
+        corresponding flag untouched; present fields overwrite. Every
+        field is optional but at least one is expected.
+      additionalProperties: false
+      properties:
+        hang:
+          type: boolean
+        hang_after_step:
+          type: integer
+          minimum: 0
+        crash_after_step:
+          type: integer
+          minimum: 0
+        silent:
+          type: boolean
+        drop_events:
+          type: boolean
+        pause_egress:
+          type: boolean
+        pause_ingress:
+          type: boolean
+
+    # --------------------------------------------------------------------
+    # Error envelope with discriminated details
+    # --------------------------------------------------------------------
+    # Per `docs/API.md` §4: every non-2xx response carries
+    # `{ "error": { "code", "message", "details", "request_id" } }`.
+    # The variants below capture the kind-specific shape of `details`.
+
+    ErrorBase:
+      type: object
+      description: |
+        Common error fields. `request_id` is always present (set by the
+        request-id middleware on every inbound request); absence indicates
+        a server bug, not a wire variant.
+      required: [code, message, request_id]
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+        request_id:
+          type: string
+
+    InvalidJsonError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [INVALID_JSON]
+
+    SchemaViolationError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [SCHEMA_VIOLATION]
+            details:
+              type: object
+              additionalProperties: true
+
+    MissingVersionError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [MISSING_VERSION]
+
+    InvalidResolutionError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [INVALID_RESOLUTION]
+
+    RunNotFoundError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [RUN_NOT_FOUND]
+
+    JobNotFoundError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [JOB_NOT_FOUND]
+
+    UnknownAttemptError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [UNKNOWN_ATTEMPT]
+
+    VersionMismatchError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code, details]
+          properties:
+            code:
+              type: string
+              enum: [VERSION_MISMATCH]
+            details:
+              type: object
+              required: [current_version, current_state]
+              additionalProperties: false
+              properties:
+                current_version:
+                  type: integer
+                  format: int64
+                current_state:
+                  $ref: '#/components/schemas/Run'
+
+    DuplicateResourceError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code, details]
+          properties:
+            code:
+              type: string
+              enum: [DUPLICATE_RESOURCE]
+            details:
+              type: object
+              required: [current_state]
+              additionalProperties: false
+              properties:
+                current_state:
+                  $ref: '#/components/schemas/Run'
+
+    AlreadyTerminalError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code, details]
+          properties:
+            code:
+              type: string
+              enum: [ALREADY_TERMINAL]
+            details:
+              type: object
+              required: [current_status, current_state]
+              additionalProperties: false
+              properties:
+                current_status:
+                  $ref: '#/components/schemas/RunStatus'
+                current_state:
+                  $ref: '#/components/schemas/Run'
+
+    InvalidTransitionError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code, details]
+          properties:
+            code:
+              type: string
+              enum: [INVALID_TRANSITION]
+            details:
+              type: object
+              required: [current_status, current_state]
+              additionalProperties: false
+              properties:
+                current_status:
+                  $ref: '#/components/schemas/DeckJobStatus'
+                current_state:
+                  $ref: '#/components/schemas/Run'
+
+    # --- DAG validation inner error variants (discriminated on inner `code`).
+
+    DagHasNoJobsDetail:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [DAG_HAS_NO_JOBS]
+
+    DuplicateJobIdDetail:
+      type: object
+      required: [code, job_id]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [DUPLICATE_JOB_ID]
+        job_id:
+          type: string
+
+    JobHasNoStepsDetail:
+      type: object
+      required: [code, job_id]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [JOB_HAS_NO_STEPS]
+        job_id:
+          type: string
+
+    UnknownDeckDetail:
+      type: object
+      required: [code, job_id, deck_id]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [UNKNOWN_DECK]
+        job_id:
+          type: string
+        deck_id:
+          type: string
+
+    DeckDecommissionedDetail:
+      type: object
+      description: |
+        Submission targets a deck that exists in the fleet but has been
+        decommissioned. Distinct from UNKNOWN_DECK so the UI can offer
+        a "revive decommissioned slot" affordance instead of "fix typo".
+      required: [code, job_id, deck_id]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [DECK_DECOMMISSIONED]
+        job_id:
+          type: string
+        deck_id:
+          type: string
+
+    UnknownDependencyDetail:
+      type: object
+      required: [code, job_id, missing_dependency]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [UNKNOWN_DEPENDENCY]
+        job_id:
+          type: string
+        missing_dependency:
+          type: string
+
+    DagHasCycleDetail:
+      type: object
+      required: [code, cycle_path]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [DAG_HAS_CYCLE]
+        cycle_path:
+          type: array
+          items:
+            type: string
+
+    DagValidationFailedDetailEntry:
+      description: |
+        Discriminated union of inner-error shapes inside
+        `DAG_VALIDATION_FAILED.details.errors[]`. The shape varies per inner
+        `code`; the UI can render kind-specific copy without parsing
+        free-form JSON.
+      oneOf:
+        - $ref: '#/components/schemas/DagHasNoJobsDetail'
+        - $ref: '#/components/schemas/DuplicateJobIdDetail'
+        - $ref: '#/components/schemas/JobHasNoStepsDetail'
+        - $ref: '#/components/schemas/UnknownDeckDetail'
+        - $ref: '#/components/schemas/DeckDecommissionedDetail'
+        - $ref: '#/components/schemas/UnknownDependencyDetail'
+        - $ref: '#/components/schemas/DagHasCycleDetail'
+      discriminator:
+        propertyName: code
+        mapping:
+          DAG_HAS_NO_JOBS: '#/components/schemas/DagHasNoJobsDetail'
+          DUPLICATE_JOB_ID: '#/components/schemas/DuplicateJobIdDetail'
+          JOB_HAS_NO_STEPS: '#/components/schemas/JobHasNoStepsDetail'
+          UNKNOWN_DECK: '#/components/schemas/UnknownDeckDetail'
+          DECK_DECOMMISSIONED: '#/components/schemas/DeckDecommissionedDetail'
+          UNKNOWN_DEPENDENCY: '#/components/schemas/UnknownDependencyDetail'
+          DAG_HAS_CYCLE: '#/components/schemas/DagHasCycleDetail'
+
+    DagValidationFailedError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code, details]
+          properties:
+            code:
+              type: string
+              enum: [DAG_VALIDATION_FAILED]
+            details:
+              type: object
+              required: [errors]
+              additionalProperties: false
+              properties:
+                errors:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/DagValidationFailedDetailEntry'
+
+    PayloadTooLargeError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [PAYLOAD_TOO_LARGE]
+
+    InternalError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [INTERNAL_ERROR]
+
+    DegradedModeError:
+      allOf:
+        - $ref: '#/components/schemas/ErrorBase'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [DEGRADED_MODE]
+
+    Error:
+      description: Discriminated union over all error codes.
+      oneOf:
+        - $ref: '#/components/schemas/InvalidJsonError'
+        - $ref: '#/components/schemas/SchemaViolationError'
+        - $ref: '#/components/schemas/MissingVersionError'
+        - $ref: '#/components/schemas/InvalidResolutionError'
+        - $ref: '#/components/schemas/RunNotFoundError'
+        - $ref: '#/components/schemas/JobNotFoundError'
+        - $ref: '#/components/schemas/UnknownAttemptError'
+        - $ref: '#/components/schemas/VersionMismatchError'
+        - $ref: '#/components/schemas/DuplicateResourceError'
+        - $ref: '#/components/schemas/AlreadyTerminalError'
+        - $ref: '#/components/schemas/InvalidTransitionError'
+        - $ref: '#/components/schemas/DagValidationFailedError'
+        - $ref: '#/components/schemas/PayloadTooLargeError'
+        - $ref: '#/components/schemas/InternalError'
+        - $ref: '#/components/schemas/DegradedModeError'
+      discriminator:
+        propertyName: code
+        mapping:
+          INVALID_JSON: '#/components/schemas/InvalidJsonError'
+          SCHEMA_VIOLATION: '#/components/schemas/SchemaViolationError'
+          MISSING_VERSION: '#/components/schemas/MissingVersionError'
+          INVALID_RESOLUTION: '#/components/schemas/InvalidResolutionError'
+          RUN_NOT_FOUND: '#/components/schemas/RunNotFoundError'
+          JOB_NOT_FOUND: '#/components/schemas/JobNotFoundError'
+          UNKNOWN_ATTEMPT: '#/components/schemas/UnknownAttemptError'
+          VERSION_MISMATCH: '#/components/schemas/VersionMismatchError'
+          DUPLICATE_RESOURCE: '#/components/schemas/DuplicateResourceError'
+          ALREADY_TERMINAL: '#/components/schemas/AlreadyTerminalError'
+          INVALID_TRANSITION: '#/components/schemas/InvalidTransitionError'
+          DAG_VALIDATION_FAILED: '#/components/schemas/DagValidationFailedError'
+          PAYLOAD_TOO_LARGE: '#/components/schemas/PayloadTooLargeError'
+          INTERNAL_ERROR: '#/components/schemas/InternalError'
+          DEGRADED_MODE: '#/components/schemas/DegradedModeError'
+
+    ErrorResponse:
+      type: object
+      description: Outer envelope wrapping every non-2xx response.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'

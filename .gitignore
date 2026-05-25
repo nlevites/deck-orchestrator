@@ -1,0 +1,65 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Git worktrees the PM agent creates per ticket (see tickets/AUTOMATION.md §2)
+.worktrees/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Go / backend (future tickets)
+bin/
+*.out
+
+# SQLite scratch
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Env
+.env
+.env.local
+
+# Local config
+config.yaml
+config.yml
+
+# `make demo` scratch directory
+.demo-state/
+
+# Playwright E2E artifacts
+frontend/test-results/
+frontend/playwright-report/
+frontend/.playwright/
+frontend/e2e/test-results/
+frontend/playwright/.cache/
+
+# Vitest / coverage output
+frontend/coverage/
+
+# Analysis runs (raw HAR / NDJSON / heap snapshots / SQLite scratch).
+# Tracked artifacts (contract.md, inefficiencies.md, REPORT.md,
+# breaking-point.md) live alongside their source dirs and are checked in.
+analysis/wire/runs/
+analysis/console/runs/
+analysis/console/test-results/
+analysis/console/report/
+analysis/console/node_modules/
+analysis/scale/runs/
+analysis/loadgen/runs/
+analysis/.venv/
+analysis/__pycache__/
+**/__pycache__/
+*.pyc

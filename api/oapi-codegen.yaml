@@ -1,0 +1,14 @@
+# Configuration for oapi-codegen.
+# Run from the deck-fleet/ root via `make gen-api-go`.
+#
+# We generate types only — no router, no server interface — to keep handlers
+# transparent to a reviewer reading them in one pass (see TECH_STACK.md §5).
+
+package: gen
+output: ../backend/internal/api/gen/types.go
+
+generate:
+  models: true
+
+output-options:
+  skip-prune: true

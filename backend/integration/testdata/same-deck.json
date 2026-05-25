@@ -1,0 +1,35 @@
+{
+  "id": "same-deck-convergence",
+  "deck_jobs": [
+    {
+      "id": "extract-a",
+      "deck_id": "deck-1",
+      "depends_on": [],
+      "steps": [{ "type": "extract", "description": "Extract from source A" }]
+    },
+    {
+      "id": "extract-b",
+      "deck_id": "deck-2",
+      "depends_on": [],
+      "steps": [{ "type": "extract", "description": "Extract from source B" }]
+    },
+    {
+      "id": "process-a",
+      "deck_id": "deck-3",
+      "depends_on": ["extract-a"],
+      "steps": [
+        { "type": "process", "description": "Process A on shared instrument" },
+        { "type": "measure", "description": "Read A result" }
+      ]
+    },
+    {
+      "id": "process-b",
+      "deck_id": "deck-3",
+      "depends_on": ["extract-b"],
+      "steps": [
+        { "type": "process", "description": "Process B on shared instrument" },
+        { "type": "measure", "description": "Read B result" }
+      ]
+    }
+  ]
+}

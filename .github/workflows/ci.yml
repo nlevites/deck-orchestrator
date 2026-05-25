@@ -1,0 +1,154 @@
+# Continuous integration. Runs the same Makefile targets a developer
+# runs locally so dev and CI never drift. See `make help` for the full
+# target tree.
+#
+# Six parallel jobs:
+#   - codegen-drift    Regen OpenAPI + sqlc bindings; fail on diff.
+#   - frontend         tsc + eslint + prettier --check + vitest + vite build.
+#   - backend-lint     gofmt + go vet + golangci-lint.
+#   - backend-unit     go test ./... (excluding integration).
+#   - backend-integration  go test ./integration/... (in-process orchestrator).
+#   - e2e              Playwright suite against a hermetic stack.
+
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codegen-drift:
+    name: codegen drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: install frontend deps
+        working-directory: frontend
+        run: npm ci
+      - name: check-codegen
+        run: make check-codegen
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: install frontend deps
+        working-directory: frontend
+        run: npm ci
+      - name: lint (typecheck + eslint + prettier)
+        run: make lint-frontend
+      - name: unit tests (vitest)
+        run: make test-frontend
+      - name: build
+        run: make build-frontend
+
+  backend-lint:
+    name: backend lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: gofmt + go vet + golangci-lint
+        run: make lint-go
+
+  backend-unit:
+    name: backend unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: go test (excl. integration)
+        run: make test-backend
+
+  backend-integration:
+    name: backend integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: integration suite
+        run: make test-integration
+
+  e2e:
+    name: e2e (playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: install frontend deps
+        working-directory: frontend
+        run: npm ci
+      # Cache the downloaded Chromium under ~/.cache/ms-playwright so
+      # repeat runs skip the ~100MB browser download.
+      - name: cache playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
+      - name: install playwright (chromium + system deps)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: make e2e-install
+      - name: install playwright system deps only (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: frontend
+        run: npx playwright install-deps chromium
+      - name: build backend binaries
+        # `make e2e` already depends on build-backend; we run it as its
+        # own step so a compile failure shows up cleanly in the log.
+        run: make build-backend
+      - name: e2e
+        run: make e2e
+      - name: upload playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 14

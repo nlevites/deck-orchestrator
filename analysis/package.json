@@ -1,0 +1,18 @@
+{
+  "name": "deck-fleet-analysis",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Playwright harness for Pillar 2B console access-pattern recording.",
+  "scripts": {
+    "console:capture": "playwright test --config console/playwright.config.ts",
+    "console:steady": "playwright test --config console/playwright.config.ts console/specs/steady-state.spec.ts",
+    "console:burst": "playwright test --config console/playwright.config.ts console/specs/event-burst.spec.ts",
+    "console:reconnect": "playwright test --config console/playwright.config.ts console/specs/reconnect.spec.ts",
+    "console:hundred": "DFO_ANALYSIS_DECKS=100 playwright test --config console/playwright.config.ts console/specs/hundred-deck-fleet.spec.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.0.0"
+  }
+}

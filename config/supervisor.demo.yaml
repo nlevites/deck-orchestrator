@@ -1,0 +1,40 @@
+# Demo-mode config for the dev-only process supervisor.
+#
+# The supervisor launches the orchestrator + N executors, watches their
+# PIDs, respawns on crash, and exposes /supervisor/* HTTP routes so the
+# Settings > Fleet Management UI can attach/detach executors at runtime.
+#
+# Companion file: config/demo.yaml (orchestrator-side config).
+# `make demo` runs:
+#   backend/bin/supervisor -config config/supervisor.demo.yaml
+
+listen_addr: ":8090"
+state_dir: "./.demo-state"
+respawn_delay: "1s"
+
+log:
+  level: "info"
+  format: "text"
+
+orchestrator:
+  binary_path: "./backend/bin/orchestrator"
+  config_path: "./config/demo.yaml"
+  http_port: 8080
+  http_scheme_host: "http://localhost"
+  db_path: "./.demo-state/orchestrator.db"
+
+executor:
+  binary_path: "./backend/bin/executor"
+  orchestrator_url: "http://localhost:8080"
+  port_base: 9000
+  step_duration: "2s"
+  heartbeat_interval: "2s"
+  poll_interval: "1s"
+  advertise_scheme: "http"
+  advertise_host: "localhost"
+
+# Filled in by the Makefile via EXECUTOR_COUNT (4 for `make demo`,
+# 25 for `make demo-large`). deck-4 is required by the fan-out,
+# fan-in, and mixed sample DAGs in the Submit page picker — without
+# it those DAGs sit in READY forever on a fresh demo.
+prelaunch_executors: []

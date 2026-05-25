@@ -1,0 +1,46 @@
+# Aggressively compressed-timing config for the Playwright E2E suite.
+#
+# Usage: spawned by the supervisor (config/supervisor.e2e.yaml) via the
+# Playwright webServer in frontend/e2e/playwright.config.ts.
+#
+# Distinct from config/demo.yaml:
+#   * Listens on :18080 so the demo (:8080) and e2e stacks can coexist.
+#   * Sub-second deadlines so failure-mode tests fire inside ~5s instead of
+#     the demo's ~15s. The whole Playwright suite targets <90s wall time.
+#   * CORS limited to the e2e Vite port (:15173).
+http:
+  addr: ":18080"
+  body_limit_bytes: 1048576
+  shutdown_grace: "2s"
+  read_header_timeout: "5s"
+  # E2E uses a short hold so failure-path tests (poll-after-cancel,
+  # poll-during-orchestrator-restart) don't sit on a 25s wait.
+  poll_hold_max: "2s"
+
+cors:
+  allowed_origins:
+    - "http://localhost:15173"
+
+# 16-slot fleet: enough for the topology specs (deck-1..deck-4) plus
+# headroom for fleet-mgmt attach/detach scenarios.
+fleet_size: 16
+
+store:
+  # DB_PATH env var overrides this at runtime so the Playwright
+  # webServer can park the SQLite file in a temp state dir.
+  path: "./orchestrator.db"
+  busy_timeout: "5s"
+  max_read_conns: 8
+
+log:
+  level: "info"
+  format: "text"
+
+timeouts:
+  heartbeat_interval: "250ms"
+  stale_threshold: "1s"
+  ambiguous_deadline: "3s"
+  attempt_deadline_base: "4s"
+  attempt_deadline_per_step: "0s"
+  abort_retry_initial: "200ms"
+  abort_retry_max_duration: "5s"

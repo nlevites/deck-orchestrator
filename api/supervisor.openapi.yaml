@@ -1,0 +1,320 @@
+openapi: 3.1.0
+info:
+  title: Deck Fleet Supervisor (dev only)
+  version: 0.1.0
+  summary: HTTP control plane for the dev-only process supervisor.
+  description: |
+    The supervisor is a separate dev-only service that owns the OS
+    lifecycle of the orchestrator and per-deck executor processes. It
+    is the moral successor to the bash respawn loops in
+    `make demo` and the Playwright e2e webServer.
+
+    Architectural boundary: the orchestrator deliberately does NOT
+    spawn other processes (see `docs/CHAOS.md`). The supervisor is the
+    one component that manages OS lifecycle; in production this would
+    be systemd / k8s instead.
+
+    Surface is namespaced under `/supervisor/*` and binds on port 8090
+    by default. The React Settings > Fleet Management page polls
+    `GET /supervisor/processes` at ~1 Hz alongside the orchestrator's
+    `GET /api/state` and cross-joins by `deck_id` to render the grid.
+
+  contact:
+    name: deck-fleet
+    url: https://example.invalid/deck-fleet
+
+servers:
+  - url: http://localhost:8090
+    description: Default supervisor bind address.
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe.
+      operationId: supervisorHealth
+      responses:
+        "200":
+          description: Supervisor process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+
+  /supervisor/processes:
+    get:
+      summary: List the orchestrator + every attached executor.
+      operationId: listProcesses
+      description: |
+        Returns a snapshot of the ProcessTable. The UI polls this at
+        1 Hz and cross-joins with `GET /api/decks` by `deck_id` to
+        render the fleet grid with both Process and Health columns.
+      responses:
+        "200":
+          description: Process inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessesResponse"
+
+  /supervisor/orchestrator/restart:
+    post:
+      summary: Restart the orchestrator gracefully.
+      operationId: restartOrchestrator
+      description: |
+        Proxies `POST /api/admin/restart` on the orchestrator. The
+        orchestrator drains in-flight requests and exits; the supervisor's
+        respawn loop relaunches it. Falls back to SIGTERM if the HTTP
+        call fails (e.g. orchestrator already crashed).
+      responses:
+        "202":
+          description: Restart accepted.
+        "404":
+          description: Orchestrator is not under this supervisor.
+        "500":
+          description: Internal error.
+
+  /supervisor/orchestrator/stop:
+    post:
+      summary: Stop the orchestrator (no respawn).
+      operationId: stopOrchestrator
+      description: |
+        SIGTERMs the orchestrator and flips its respawn policy to
+        `never`. Use `/supervisor/orchestrator/start` to resume.
+      responses:
+        "204":
+          description: Stop signal sent.
+        "404":
+          description: Orchestrator is not under this supervisor.
+
+  /supervisor/orchestrator/start:
+    post:
+      summary: Start (or resume) the orchestrator.
+      operationId: startOrchestrator
+      responses:
+        "204":
+          description: Start scheduled.
+        "404":
+          description: Orchestrator is not under this supervisor.
+
+  /supervisor/orchestrator/kill:
+    post:
+      summary: SIGKILL the orchestrator (chaos hook).
+      operationId: killOrchestrator
+      description: |
+        SIGKILLs the orchestrator's process group. Policy stays Always so
+        the respawn loop brings it back. Used by the e2e suite to
+        simulate a hard crash that bypasses graceful shutdown; production
+        operators use `/supervisor/orchestrator/restart` instead.
+      responses:
+        "202":
+          description: SIGKILL sent.
+        "404":
+          description: Orchestrator is not under this supervisor.
+        "500":
+          description: Internal error.
+
+  /supervisor/executors:
+    post:
+      summary: Attach an executor to a deck slot.
+      operationId: attachExecutor
+      description: |
+        Inserts a `Starting` row in the ProcessTable, allocates a port
+        from the free pool, and launches the executor binary. If a
+        previous executor was attached to the same `deck_id` and is
+        currently `Stopped` or `FatalConfig`, the call resumes that
+        entry. Returns 409 if the slot is currently `Running` or
+        `Starting`.
+
+        `fresh_state: true` deletes the executor's local SQLite file
+        before launching (useful for the "new hardware" narrative).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachRequest"
+      responses:
+        "202":
+          description: Attach accepted; entry is in `Starting` state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessEntry"
+        "400":
+          description: Missing or empty `deck_id`.
+        "409":
+          description: Executor already attached for this `deck_id`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  entry:
+                    $ref: "#/components/schemas/ProcessEntry"
+        "500":
+          description: Internal error (out of free ports, etc.).
+
+  /supervisor/executors/{deck_id}/stop:
+    post:
+      summary: Stop an attached executor (no respawn).
+      operationId: stopExecutor
+      parameters:
+        - in: path
+          name: deck_id
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Stop signal sent.
+        "404":
+          description: No executor attached for this `deck_id`.
+
+  /supervisor/executors/{deck_id}/start:
+    post:
+      summary: Resume a stopped executor.
+      operationId: startExecutor
+      parameters:
+        - in: path
+          name: deck_id
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Start scheduled.
+        "404":
+          description: No executor attached for this `deck_id`.
+
+  /supervisor/executors/{deck_id}/restart:
+    post:
+      summary: Restart an attached executor.
+      operationId: restartExecutor
+      description: |
+        Signals SIGTERM. The respawn loop relaunches the binary
+        automatically because policy stays `always`.
+      parameters:
+        - in: path
+          name: deck_id
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Restart signal sent.
+        "404":
+          description: No executor attached for this `deck_id`.
+
+  /supervisor/executors/{deck_id}:
+    delete:
+      summary: Detach an executor (stop process, free port, remove entry).
+      operationId: detachExecutor
+      description: |
+        Stops the executor (if running), releases its port back to the
+        pool, and removes the entry from the ProcessTable. Idempotent:
+        detaching an already-detached slot is a no-op. Does NOT touch
+        the orchestrator's `decks` table — the slot is still part of
+        the fleet and will age `STALE` -> `UNREACHABLE` -> (eventually)
+        `EMPTY` via the orchestrator's liveness sweep.
+      parameters:
+        - in: path
+          name: deck_id
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Detach completed.
+
+components:
+  schemas:
+    ProcessKind:
+      type: string
+      enum: [orchestrator, executor]
+
+    ProcessState:
+      type: string
+      description: |
+        Operator-visible state for a supervised child:
+          * `Starting`: just launched, hasn't reached steady state.
+          * `Running`: process is up and not exiting.
+          * `Stopped`: operator told us to stop; respawn disabled.
+          * `Crashing`: process exited unexpectedly; about to respawn.
+          * `FatalConfig`: child exited with code 78 (EX_CONFIG); the
+            supervisor stops the loop to avoid hammering the
+            orchestrator with rejected heartbeats.
+      enum: [Starting, Running, Stopped, Crashing, FatalConfig]
+
+    Policy:
+      type: string
+      enum: [always, never]
+
+    ProcessEntry:
+      type: object
+      additionalProperties: false
+      required: [label, kind, state, policy]
+      properties:
+        label:
+          type: string
+          description: Stable key in the ProcessTable.
+        kind:
+          $ref: "#/components/schemas/ProcessKind"
+        deck_id:
+          type: string
+          description: Present for executor entries only.
+        port:
+          type: integer
+          description: TCP port the child binds.
+        db_path:
+          type: string
+        args:
+          type: array
+          items: { type: string }
+        env:
+          type: array
+          items: { type: string }
+        log_path:
+          type: string
+        policy:
+          $ref: "#/components/schemas/Policy"
+        state:
+          $ref: "#/components/schemas/ProcessState"
+        pid:
+          type: integer
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_exit_code:
+          type: integer
+          nullable: true
+        last_exit_reason:
+          type: string
+
+    ProcessesResponse:
+      type: object
+      additionalProperties: false
+      required: [executors]
+      properties:
+        orchestrator:
+          $ref: "#/components/schemas/ProcessEntry"
+        executors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessEntry"
+
+    AttachRequest:
+      type: object
+      additionalProperties: false
+      required: [deck_id]
+      properties:
+        deck_id:
+          type: string
+        fresh_state:
+          type: boolean
+          default: false
+          description: |
+            If true, delete the executor's local SQLite DB before
+            launch so it re-registers as a fresh attach.

@@ -1,0 +1,31 @@
+version: "2"
+
+run:
+  timeout: 2m
+
+linters:
+  default: none
+  enable:
+    - errcheck      # ignored error returns; load-bearing for our state-transition code
+    - staticcheck   # large catch-all (subsumes gosimple, unused)
+    - govet         # wraps `go vet`
+    - ineffassign   # dead assignments
+    - exhaustive    # enforces exhaustive switches over typed enums (DeckJobStatus, EventKind, ErrorCode, ...)
+    - bodyclose     # unclosed http.Response.Body
+    - nilerr        # mismatched nil error / nil result returns
+  exclusions:
+    generated: strict
+    paths:
+      - internal/api/gen
+      - internal/store/gen
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+      check:
+        - switch
+    errcheck:
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - fmt.Fprintln
+        - fmt.Fprintf
+        - fmt.Fprint
